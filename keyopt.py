@@ -1,6 +1,7 @@
 import numpy as np
 import re
 import itertools
+import functools
 from pathlib import Path
 import multiprocessing as mp
 
@@ -8,8 +9,6 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.cm import ScalarMappable 
-
-from scipy.optimize import quadratic_assignment
 
 dir = Path(__file__).resolve().parent
 DIR_DATA = dir / 'data'
@@ -86,59 +85,76 @@ def dist_metric(x0, y0, x1, y1, a = 1):
   return (dx**2 + (dy/a)**2)**0.5
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-def objective(p, W, D):
-  return np.trace(W.T @ D[p][:,p])
+def objective(W, D, p):
+  # return np.trace(W.T @ D[p][:,p])
+  return np.einsum('ij,ij->', W, D[p][:,p])
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-def _qab(args):
-  rank, sols, W, D, niter = args
+def assignment_2opt(n, f, p = None):
+  """https://github.com/scipy/scipy/blob/v1.9.3/scipy/optimize/_qap.py
+  """
 
-  for i in range(niter):
+  p0 = np.arange(n)
 
-    # NOTE: the solution here is a local greedy algorithm, and depends on 
-    # the (random) initialization.
-    res = quadratic_assignment(
-      W, 
-      D,
-      method = '2opt' )
+  if p is None:
+    p = np.random.default_rng().permutation(p0)
+  
+  c = f(p)
 
-    if res.fun < sols[-1][0]:
-      print(f"{rank}-{i}: {res.fun}")
-      sols.append((res.fun, res.col_ind))
+  n_iter = 0
+  done = False
+  
+  while not done:
+    better = None
 
+    for i, j in itertools.combinations_with_replacement(p0, 2):
+      n_iter += 1
+      p[i], p[j] = p[j], p[i]
+      _c = f(p)
+
+      if _c < c:
+        c = _c
+        better = (i,j)
+      
+      p[i], p[j] = p[j], p[i]
+
+    if not better:
+      done = True
+       
     else:
-      print(f"{rank}-{i}: --")
+      i, j = better
+      p[i], p[j] = p[j], p[i]
 
-  return sols
-
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-def quadratic_assignment_brute(W, D, niter, nproc ):
-
-  res = quadratic_assignment(
-    W, 
-    D,
-    method = 'faq',
-    options = dict(
-      maxiter = int(1e6),
-      tol = 1e-9 ))
-
-  print(res)
-
-  sols = [(res.fun, res.col_ind)]
-
-  _niter = (niter+nproc-1)//nproc
-
-  with mp.Pool(nproc) as pool:
-    for _sols in pool.map(_qab, [(i, sols, W, D, _niter) for i in range(nproc)] ):
-      for sol in _sols:
-        if sol[0] < sols[-1][0]:
-          sols.append(sol)
-
-  return sols
+  return c, p
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-def plot_sol(_p, W, D, out_dir = Path()):
-  obj = objective(_p, W, D)
+def assignment_2opt_shuffle(n, m, niter, f):
+  rng = np.random.default_rng()
+
+  p0 = np.arange(n)
+  c, p = assignment_2opt(n, f)
+  
+  for i in range(niter):
+    idx = rng.choice(n, m, replace = False)
+    _p = p.copy()
+    _p[idx] = rng.permutation(p[idx])
+
+    _c, _p = assignment_2opt(n, f, _p)
+
+    if _c < c:
+      print(f"{i}: {c}")
+      c = _c
+      p = _p
+
+    elif i > 0 and i % 10 == 0:
+      print(f"{i}: <= {_c}")
+
+
+  return c, p
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+def plot_sol(_p, W, D, ref, out_dir = Path()):
+  obj = objective(W, D, _p) / ref
 
   _pinv = np.empty_like(_p)
   _pinv[_p] = _P0
@@ -237,7 +253,7 @@ def plot_sol(_p, W, D, out_dir = Path()):
   ax.set_xticks(np.arange(8))
   ax.set_yticks(np.arange(4))
 
-  fname = out_dir / f'keyopt-{int(1000*obj)}-{perm}.svg'
+  fname = out_dir / f'keyopt-{int(1000*obj):04}-{perm}.svg'
   print(fname)
   plt.savefig(fname)
   # plt.show()
@@ -250,7 +266,7 @@ if __name__ == '__main__':
 
   # number of restart iterations in global optimization
   niter = 1000
-  nproc = 4
+  nproc = 1
 
   # elliptic axis in horizontal direction 
   # larger value reduces cost of horizontal translation
@@ -261,6 +277,13 @@ if __name__ == '__main__':
 
   # weight (frequency) of 2-grams
   g2_fac = 1.0
+
+  # weight factor for logical relation between characters
+  # NOTE: should be small to tie-break based on lexical ordering
+  l2_fac = 0.001
+
+  # Amount of asymmetry to introduce to tie-break mirror symmetries 
+  asym_fac = 0.02
 
   # only needed to extract values from tsv, saved as the npy files
   # convert_ngrams()
@@ -290,10 +313,15 @@ if __name__ == '__main__':
   _y = y.ravel()
 
   # 1-gram distance from 'centered' position
-  # NOTE: offset to remove reflection symmetry (degenerate minimums)
-  r = dist_metric(1.55, 3.45, x, y, a1)
+  r = dist_metric(1.5, 3.5, x, y, a1)
+
+  # NOTE: remove reflection symmetry that causes degenerate minimums
+  r -= asym_fac*(x - 1.5)
+  r += asym_fac*(y - 3.5)
 
   d = r.copy()
+  # NOTE: forces solution away from bottom left/right 3 keys, reserved for 
+  # 2U space, punctuation, and other future use
   d[3,:3] = 1e6
   d[3,-3:] = 1e6
   
@@ -307,16 +335,24 @@ if __name__ == '__main__':
 
   W[:] += g2_fac * g2
 
+  # NOTE: this weight is based on the logical distance between the characters
+  # in lexical ording, falling off quickly for well separated characters 
+  # e.g. (A,B) has a higher weight than (A,G), but (A,A) -> 0.
+  l = (_P0[None, :] - _P0[:, None])**2
+  m = l > 0.0
+  W[:] += l2_fac * m / np.where(m, l, 1)
+
   # these are just the 'control' solutions for comparison
   nominal = get_permutation("ABCDEFGHIJKLMNOPQRSTUVWX012YZ345")
   qwerty = get_permutation("QWERTYUIASDFGHJOZXCVBNMP012KL345")
 
   _ps = [
-    (objective(nominal, W, D), nominal), 
-    (objective(qwerty, W, D), qwerty)]
+    (objective(W, D, nominal), nominal), 
+    (objective(W, D, qwerty), qwerty)]
 
-  _ps.extend(quadratic_assignment_brute(W, D, niter = niter, nproc = nproc))
+  f = functools.partial(objective, W, D)
+  _ps.append(assignment_2opt_shuffle(len(W), len(W)//2, niter, f))
 
   for obj, _p in _ps:
-    plot_sol(_p, W, D, out_dir = DIR_SOL)
+    plot_sol(_p, W, D, ref = _ps[0][0], out_dir = DIR_SOL)
 
