@@ -85,9 +85,26 @@ def dist_metric(x0, y0, x1, y1, a = 1):
   return (dx**2 + (dy/a)**2)**0.5
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-def objective(W, D, p):
-  # return np.trace(W.T @ D[p][:,p])
-  return np.einsum('ij,ij->', W, D[p][:,p])
+def qap_objective(C, F, D, p):
+  r"""Objective function for the quadratic assignment problem
+
+  .. math::
+
+    trace(C p^T + F^T p D p^T)
+
+  Parameters
+  ----------
+  C : array[n,n]
+    Cost to place facility i at location j
+  F : array[n,n]
+    Flow between facilities i and j
+  D : array[n,n]
+    Distance of transition between locations i and j
+  p : array[n]
+    The placement permutation vector
+  """
+
+  return np.einsum('ij,ij', F, D[p][:,p]) + np.einsum('ii', C[:,p])
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 def assignment_2opt(n, f, p = None):
@@ -153,8 +170,8 @@ def assignment_2opt_shuffle(n, m, niter, f):
   return c, p
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-def plot_sol(_p, W, D, ref, out_dir = Path()):
-  obj = objective(W, D, _p) / ref
+def plot_sol(_p, C, F, D, ref, out_dir = Path()):
+  obj = qap_objective(C, F, D, _p) / ref
 
   _pinv = np.empty_like(_p)
   _pinv[_p] = _P0
@@ -162,7 +179,7 @@ def plot_sol(_p, W, D, ref, out_dir = Path()):
   p = _p.reshape(4, 8)
   pinv = _pinv.reshape(4, 8)
 
-  _W = np.zeros(IJ2.shape[:1])
+  _F = np.zeros(IJ2.shape[:1])
 
   for i, (a, b) in enumerate(IJ2):
     if np.all(a == b):
@@ -171,8 +188,8 @@ def plot_sol(_p, W, D, ref, out_dir = Path()):
     ka = pinv[a[0], a[1]]
     kb = pinv[b[0], b[1]]
 
-    _W[i] = W[ka, kb] + W[kb, ka]
-    # print(f"{AZ[ka]} - {AZ[kb]}: {_W[i]}")
+    _F[i] = F[ka, kb] + F[kb, ka]
+    # print(f"{AZ[ka]} - {AZ[kb]}: {_F[i]}")
 
   perm = ''.join([AZ[i] for i in _pinv])
 
@@ -194,7 +211,7 @@ def plot_sol(_p, W, D, ref, out_dir = Path()):
   cmap_n1[:,3] = 1
   cmap_n1 = ListedColormap(cmap_n1)
 
-  norm_n2 = plt.Normalize(0, _W.max())
+  norm_n2 = plt.Normalize(0, _F.max())
 
   cmap_n2 = np.zeros((256,4))
   cmap_n2[:,0] = 1
@@ -220,9 +237,9 @@ def plot_sol(_p, W, D, ref, out_dir = Path()):
     cmap = cmap_n2,
     norm = norm_n2,
     linewidth = 2,
-    array = _W )
+    array = _F )
 
-  # lc.set_array(_W)
+  # lc.set_array(_F)
   # lc.set_linewidth(2)
   line = ax.add_collection(lc)
 
@@ -265,7 +282,7 @@ def plot_sol(_p, W, D, ref, out_dir = Path()):
 if __name__ == '__main__':
 
   # number of restart iterations in global optimization
-  niter = 1000
+  niter = 10
   nproc = 1
 
   # elliptic axis in horizontal direction 
@@ -331,28 +348,31 @@ if __name__ == '__main__':
   for i, j in itertools.product(_P0, repeat = 2):
     D[i,j] += dist_metric(_x[i], _y[i], _x[j], _y[j], a2)
 
-  W = np.diag(g1)
+  F = np.diag(g1)
 
-  W[:] += g2_fac * g2
+  F[:] += g2_fac * g2
 
   # NOTE: this weight is based on the logical distance between the characters
   # in lexical ording, falling off quickly for well separated characters 
   # e.g. (A,B) has a higher weight than (A,G), but (A,A) -> 0.
   l = (_P0[None, :] - _P0[:, None])**2
   m = l > 0.0
-  W[:] += l2_fac * m / np.where(m, l, 1)
+  F[:] += l2_fac * m / np.where(m, l, 1)
+
+  # placement 'cost'
+  C = np.zeros((32,32))
 
   # these are just the 'control' solutions for comparison
   nominal = get_permutation("ABCDEFGHIJKLMNOPQRSTUVWX012YZ345")
   qwerty = get_permutation("QWERTYUIASDFGHJOZXCVBNMP012KL345")
 
   _ps = [
-    (objective(W, D, nominal), nominal), 
-    (objective(W, D, qwerty), qwerty)]
+    (qap_objective(C, F, D, nominal), nominal), 
+    (qap_objective(C, F, D, qwerty), qwerty)]
 
-  f = functools.partial(objective, W, D)
-  _ps.append(assignment_2opt_shuffle(len(W), len(W)//2, niter, f))
+  f = functools.partial(qap_objective, C, F, D)
+  _ps.append(assignment_2opt_shuffle(len(F), len(F)//2, niter, f))
 
   for obj, _p in _ps:
-    plot_sol(_p, W, D, ref = _ps[0][0], out_dir = DIR_SOL)
+    plot_sol(_p, C, F, D, ref = _ps[0][0], out_dir = DIR_SOL)
 
