@@ -111,36 +111,98 @@ def assignment_2opt(n, f, p = None):
   """https://github.com/scipy/scipy/blob/v1.9.3/scipy/optimize/_qap.py
   """
 
+  rng = np.random.default_rng()
   p0 = np.arange(n)
 
   if p is None:
-    p = np.random.default_rng().permutation(p0)
+    p = rng.permutation(p0)
   
   c = f(p)
+  cref = c
+
+  print(f"  cref: {cref:.2e}")
+
+  cbest = c
+  pbest = p
+
+  if cref == 0:
+    return c, p
 
   n_iter = 0
-  done = False
+
+  k = 8.0
+  kmod = 10
+  kfac = 1.25
+  kmax = 2**32
+
+  cost = np.zeros((n,n), dtype = np.float64)
   
-  while not done:
-    better = None
+  while True:
+    n_iter += 1
+    cost[:] = -1.0
+
+    if n_iter % kmod == 0 and k < kmax:
+      k *= kfac
 
     for i, j in itertools.combinations_with_replacement(p0, 2):
-      n_iter += 1
+      if i == j:
+        continue
+
       p[i], p[j] = p[j], p[i]
       _c = f(p)
 
-      if _c < c:
-        c = _c
-        better = (i,j)
-      
+      if _c < cbest:
+        cbest = _c
+        pbest = p.copy()
+
+      cost[i,j] = _c
       p[i], p[j] = p[j], p[i]
 
-    if not better:
-      done = True
-       
+    m = cost < 0.0
+    x = k*(cost - c)/cref
+    m |= x < -50
+
+    x = np.clip(x, -50, 50)
+    prob = np.exp(-x)
+    prob = np.where(m, 0.0, prob)
+    s0 = prob.max()
+
+    if s0 == 0.0:
+      break
+
+    prob /= s0
+    prob /= prob.sum()
+
+    if k < kmax:
+      i = rng.choice(n*n, p = prob.ravel())
     else:
-      i, j = better
+      i = np.argmax(prob.ravel())
+
+    i, j = divmod(i, n)
+
+    p[i], p[j] = p[j], p[i]
+    _c = f(p)
+
+    if k >= kmax and _c >= c:
       p[i], p[j] = p[j], p[i]
+      break
+
+    if _c < 2*c:
+      c = _c
+    else:
+      p[i], p[j] = p[j], p[i]
+
+    if n_iter % kmod == 0:
+      print(f"  {n_iter}: {int(np.log2(k))}, ({i},{j}) -> {c/cref:.2e}")
+      # plt.imshow(prob)
+      # plt.title(f"{n_iter}: {int(np.log2(k))}, ({i},{j}) -> {c/cref:.2e}")
+      # plt.show()
+
+  if cbest < c:
+    c = cbest
+    p = pbest
+
+  print(f"  best: {c:.2e}")
 
   return c, p
 
@@ -150,6 +212,9 @@ def assignment_2opt_shuffle(n, m, niter, f):
 
   p0 = np.arange(n)
   c, p = assignment_2opt(n, f)
+  cref = c
+
+  print(f"cref: {cref:.2e}")
   
   for i in range(niter):
     idx = rng.choice(n, m, replace = False)
@@ -159,13 +224,12 @@ def assignment_2opt_shuffle(n, m, niter, f):
     _c, _p = assignment_2opt(n, f, _p)
 
     if _c < c:
-      print(f"{i}: {c}")
       c = _c
       p = _p
 
-    elif i > 0 and i % 10 == 0:
-      print(f"{i}: <= {_c}")
+    print(f"{i+1}: {c/cref:.2e}")
 
+  print(f"best: {c:.2e}")
 
   return c, p
 
